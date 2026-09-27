@@ -16,13 +16,32 @@
 |---|---|
 | 模型 | GPT-2 124M（163M 含 wpe），12L/12H/768d/1024 ctx |
 | 数据 | FineWeb-Edu sample-10BT 前 2 shards → train 1.50B tokens + val 2.2M tokens（GPT-2 BPE, uint16 bins） |
-| 训练 | fp16 + GradScaler（T4 无 bf16）、SDPA、fused AdamW、global batch 32768 tokens、cosine LR 6e-4、10000 iters ≈ 328M tokens |
-| 吞吐 | ~15.3k tok/s（T4, GPU 100%, 峰值 9.9GB） |
+| 训练 | bf16（4060 Ti Ada 原生）/ fp16+GradScaler（T4）、SDPA、fused AdamW、global batch 32768 tokens、warmup 200 + cosine LR 6e-4→0.1x、10000 iters ≈ 328M tokens |
+| 吞吐 | ~29k tok/s（4060 Ti, bf16, GPU 100%, 峰值 9.9GB）；~15.3k tok/s（T4 参照） |
+
+## Phase 0b：长上下文扩展（32k）
+
+目的：1024 ctx 看不出各 attention 变体的长程检索（大海捞针）差异。协议见 `phase0-124m/lc_protocol.json`。
+
+课程化三阶段（每阶段 328M tokens，global batch 恒 32768 tok/step）：
+
+1. **rope-1024-parity**：RoPE 替换 wpe，同预算复训，验证与 wpe baseline 的 loss parity（gate：终值差 ~0.03 内）——长上下文支线全部走 RoPE 主干
+2. **lc-4k**：YaRN factor 4 续训（init-from parity ckpt，LR 1e-4）
+3. **lc-32k**：YaRN factor 32 续训（LR 5e-5），分块 CE + 梯度检查点在此启用
+
+消融格：`wpe-32k-ext`（wpe 表尾块平铺扩到 32k，同预算）= 位置编码轴对照；可选 `lc-32k-scratch`（原生 32k 从零训）分离续训贡献。
+
+评估：`eval_lengths.csv` 记录 1k/2k/8k/32k 多窗口 val loss（loss-vs-context 曲线）；NIAH 谜题独立 harness（待建）。注意 MHA/GQA/MLA 的 KV 差异在 32k/16GB 下不设 KV 容量压力，预期不分高下，该轴需 128k+ 或等 KV 预算 + 驱逐。
+
+工程要点：train.bin 是扁平 token 流，**seq_len 是纯视图参数，4k/32k 不需要重新打包数据**；32k 时 logits 若整体物化需 3.3GB bf16（autograd 下 ×2-3），train_lc.py 用分块 + checkpoint 的 CE 规避，micro-bs 1 显存 ~7GB。
 
 ## 文件
 
 - `phase0-124m/prep_data.py` — 流式 tokenize（12GB RAM 安全，逐 batch 读 parquet，2 vCPU × tiktoken）
 - `phase0-124m/train.py` — nanoGPT 风格单文件训练器，带 loss-vs-GPU-hour CSV 日志（log.csv：iter/loss/val_loss/tok_s/vram/elapsed）、best-val 与周期 checkpoint、resume
+- `phase0-124m/train_lc.py` — 长上下文版训练器：RoPE/YaRN（NTK-by-parts + attention 温度）、wpe 可选 + `--extend-wpe` 尾块平铺扩表、分块+checkpoint 交叉熵、块级激活检查点（阈值可配）、多长度 val eval（eval_lengths.csv）、init-from 支持跨位置编码/长度热启动；seq_len 为视图参数，数据无需重打包
+- `phase0-124m/prep_data_lc.py` — 长上下文数据就绪校验（token id 范围、EOT 密度、各 seq_len 窗口统计）→ data_manifest.json
+- `phase0-124m/lc_protocol.json` — 32k 扩展协议：三阶段命令/预算/ETA + 消融格 + 评估协议
 
 ## 已知坑（Colab free T4）
 

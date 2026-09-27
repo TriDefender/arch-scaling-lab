@@ -1,0 +1,2 @@
+usage: train.py [-h] [--max-iters MAX_ITERS] [--resume RESUME]
+train.py: error: unrecognized arguments: --data-dir . --out-dir runs/124m-baseline --n-layer 12 --n-head 12 --n-embd 768 --batch-size 12 --block-size 1024 --devices 1

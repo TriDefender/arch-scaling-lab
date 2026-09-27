@@ -1,0 +1,2 @@
+iter,loss,val_loss,tok_s,vram_gb,elapsed_s
+1749,4.6445,4.6516,21980,10.48,373

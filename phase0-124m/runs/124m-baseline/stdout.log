@@ -1,0 +1,40 @@
+params: 163.0M
+amp dtype: torch.bfloat16
+train tokens: 1501.2M, val tokens: 2.2M
+it 0 | loss 10.986 | 16012 tok/s | 8.7GB | 0min
+it 50 | loss 7.612 | 28961 tok/s | 9.9GB | 1min
+it 100 | loss 7.097 | 29218 tok/s | 9.9GB | 2min
+it 150 | loss 6.544 | 29294 tok/s | 9.9GB | 3min
+it 200 | loss 6.299 | 29337 tok/s | 9.9GB | 4min
+== eval it 249: val 6.3212 (5min) ==
+it 250 | loss 6.403 | 28490 tok/s | 9.9GB | 5min
+it 300 | loss 6.177 | 28646 tok/s | 9.9GB | 6min
+it 350 | loss 6.015 | 28764 tok/s | 9.9GB | 7min
+it 400 | loss 5.745 | 28844 tok/s | 9.9GB | 8min
+it 450 | loss 5.786 | 28905 tok/s | 9.9GB | 9min
+== eval it 499: val 5.8843 (10min) ==
+it 500 | loss 5.767 | 28564 tok/s | 9.9GB | 10min
+it 550 | loss 5.478 | 28639 tok/s | 9.9GB | 11min
+it 600 | loss 5.533 | 28696 tok/s | 9.9GB | 11min
+it 650 | loss 5.599 | 28755 tok/s | 9.9GB | 12min
+it 700 | loss 5.352 | 28804 tok/s | 9.9GB | 13min
+== eval it 749: val 5.4527 (14min) ==
+it 750 | loss 5.378 | 28575 tok/s | 9.9GB | 14min
+it 800 | loss 5.347 | 28629 tok/s | 9.9GB | 15min
+it 850 | loss 5.275 | 28676 tok/s | 9.9GB | 16min
+it 900 | loss 5.442 | 28717 tok/s | 9.9GB | 17min
+it 950 | loss 5.049 | 28739 tok/s | 9.9GB | 18min
+== eval it 999: val 5.1810 (19min) ==
+it 1000 | loss 5.045 | 28408 tok/s | 9.9GB | 19min
+it 1050 | loss 5.113 | 28343 tok/s | 9.9GB | 20min
+it 1100 | loss 5.127 | 28317 tok/s | 9.9GB | 21min
+it 1150 | loss 5.077 | 28309 tok/s | 9.9GB | 22min
+it 1200 | loss 5.013 | 28291 tok/s | 9.9GB | 23min
+== eval it 1249: val 4.9773 (24min) ==
+it 1250 | loss 4.809 | 28127 tok/s | 9.9GB | 24min
+it 1300 | loss 4.920 | 28061 tok/s | 9.9GB | 25min
+it 1350 | loss 4.740 | 27914 tok/s | 9.9GB | 26min
+it 1400 | loss 4.964 | 27865 tok/s | 9.9GB | 27min
+it 1450 | loss 4.962 | 27875 tok/s | 9.9GB | 28min
+== eval it 1499: val 4.7975 (30min) ==
+it 1500 | loss 4.505 | 27644 tok/s | 9.9GB | 30min

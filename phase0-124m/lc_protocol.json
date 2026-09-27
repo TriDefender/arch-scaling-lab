@@ -1,0 +1,53 @@
+{
+  "protocol": "long-context extension, curriculum 1024 -> 4k -> 32k",
+  "data": "same flat train.bin/val.bin as Phase 0 (1.50B train tokens); seq_len is a view parameter, no repack",
+  "optimizer_recipe": "same as train.py: fused AdamW b(0.9,0.95), cosine LR to 0.1x, wd 0.1, clip 1.0, warmup then decay",
+  "budget_per_stage_tokens": "32768 tok/step global batch at every stage; --max-iters sets stage budget (10000 iters = 328M tokens)",
+  "stages": [
+    {
+      "name": "rope-1024-parity",
+      "purpose": "RoPE-vs-wpe parity at matched budget; gate for the extension line (expect final val within ~0.03 of wpe baseline 124m-baseline)",
+      "cmd": "python train_lc.py --seq-len 1024 --pos rope --rope-factor 1 --lr 6e-4 --warmup 200 --max-iters 10000 --out-dir runs/rope-1024",
+      "tokens": "328M",
+      "init_from": null,
+      "eta_hours_4060ti": 3.2
+    },
+    {
+      "name": "lc-4k",
+      "purpose": "context extension stage 1 (4x); YaRN factor 4",
+      "cmd": "python train_lc.py --seq-len 4096 --rope-factor 4 --rope-orig-len 1024 --lr 1e-4 --warmup 100 --max-iters 10000 --init-from runs/rope-1024/ckpt_final.pt --out-dir runs/lc-4k",
+      "tokens": "328M",
+      "init_from": "runs/rope-1024/ckpt_final.pt",
+      "eta_hours_4060ti": 3.8
+    },
+    {
+      "name": "lc-32k",
+      "purpose": "context extension stage 2 (32x total); YaRN factor 32, chunked CE + block checkpointing engage",
+      "cmd": "python train_lc.py --seq-len 32768 --rope-factor 32 --rope-orig-len 1024 --lr 5e-5 --warmup 100 --max-iters 10000 --micro-bs 1 --init-from runs/lc-4k/ckpt_final.pt --out-dir runs/lc-32k",
+      "tokens": "328M",
+      "init_from": "runs/lc-4k/ckpt_final.pt",
+      "eta_hours_4060ti": 6.5
+    }
+  ],
+  "ablation_cells": [
+    {
+      "name": "wpe-32k-ext",
+      "purpose": "position-encoding axis control: extend the wpe baseline table (tail-tiled) to 32k under identical budget; quantifies wpe-vs-RoPE extension gap",
+      "cmd": "python train_lc.py --seq-len 32768 --pos wpe --extend-wpe --lr 5e-5 --warmup 100 --max-iters 10000 --micro-bs 1 --init-from runs/124m-baseline/ckpt_final.pt --out-dir runs/wpe-32k-ext"
+    },
+    {
+      "name": "lc-32k-scratch (optional)",
+      "purpose": "separate native-long cell: RoPE 32k from scratch, no curriculum -- isolates what continued training contributes",
+      "cmd": "python train_lc.py --seq-len 32768 --rope-factor 32 --lr 6e-4 --warmup 200 --max-iters 10000 --micro-bs 1 --out-dir runs/lc-32k-scratch"
+    }
+  ],
+  "eval_protocol": {
+    "long_range_ppl": "eval_lengths.csv: fixed-seed val loss at 1024/2048/8192/32768 every 1000 iters (loss-vs-context curve per stage)",
+    "niah": "separate harness (planned); 32k single-needle over FineWeb-Edu distractors + multi-needle variant",
+    "note": "MHA-vs-GQA-vs-MLA KV differences are NOT expected to separate at 32k on 16GB; those need 128k+ or enforced equal KV budget with eviction"
+  },
+  "expected_vram_4060ti_16gb": {
+    "seq_1024": "~10GB (no checkpointing)",
+    "seq_32768": "~7GB (chunked CE + per-block checkpointing, micro-bs 1)"
+  }
+}

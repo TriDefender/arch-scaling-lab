@@ -1,0 +1,5 @@
+params: 163.0M
+amp dtype: torch.bfloat16
+train tokens: 1501.2M, val tokens: 2.2M
+it 0 | loss 10.986 | 20667 tok/s | 8.7GB | 0min
+it 50 | loss 7.612 | 29264 tok/s | 9.9GB | 1min
