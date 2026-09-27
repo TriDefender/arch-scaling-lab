@@ -1,8 +1,8 @@
-"""Phase 0: GPT-2 (124M) from-scratch baseline on FineWeb-Edu, T4-adapted.
+"""Phase 0: GPT-2 (124M) from-scratch baseline on FineWeb-Edu.
 
-nanoGPT-style single file. fp16 + GradScaler (Turing has no bf16), SDPA attention.
-Logs step, loss, val loss, tok/s, peak VRAM, elapsed -> /content/log.csv (loss-vs-GPU-hour data).
-Resume: --resume /content/ckpt.pt
+nanoGPT-style single file. Auto dtype: bf16 (Ada+) or fp16+GradScaler (Turing), SDPA attention.
+Logs step, loss, val loss, tok/s, peak VRAM, elapsed -> <script_dir>/log.csv (loss-vs-GPU-hour data).
+Resume: --resume ckpt_last.pt
 Usage: python train.py [--max-iters N] [--resume CKPT]
 """
 import argparse
@@ -28,8 +28,10 @@ GRAD_CLIP = 1.0
 EVAL_INTERVAL = 250
 EVAL_ITERS = 40
 CKPT_EVERY = 1000
-LOG = "/content/log.csv"
-DATA = "/content/data"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CKPT_DIR = os.environ.get("ASL_OUT", SCRIPT_DIR)
+LOG = os.path.join(CKPT_DIR, "log.csv")
+DATA = os.path.join(SCRIPT_DIR, "data")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--max-iters", type=int, default=10000)
@@ -128,19 +130,19 @@ opt = torch.optim.AdamW(
     [{"params": decay, "weight_decay": WEIGHT_DECAY}, {"params": no_decay, "weight_decay": 0.0}],
     lr=LR, betas=(0.9, 0.95), eps=1e-8, fused=True,
 )
-scaler = torch.amp.GradScaler("cuda")
+AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+scaler = torch.amp.GradScaler("cuda", enabled=(AMP_DTYPE == torch.float16))
+print(f"amp dtype: {AMP_DTYPE}", flush=True)
 
 # ---------------- data ----------------
-train_bins = [np.memmap(f"{DATA}/train.bin", dtype=np.uint16, mode="r")]
-if os.path.exists(f"{DATA}/train1.bin"):  # merged file only
-    train_bins = [np.memmap(f"{DATA}/train.bin", dtype=np.uint16, mode="r")]
+train_data = np.memmap(f"{DATA}/train.bin", dtype=np.uint16, mode="r")
 val_data = np.memmap(f"{DATA}/val.bin", dtype=np.uint16, mode="r")
-ntok = train_bins[0].size
+ntok = train_data.size
 print(f"train tokens: {ntok/1e6:.1f}M, val tokens: {val_data.size/1e6:.1f}M", flush=True)
 
 
 def get_batch(split):
-    data = train_bins[0] if split == "train" else val_data
+    data = train_data if split == "train" else val_data
     ix = torch.randint(len(data) - BLOCK - 1, (MICRO_BS,))
     x = torch.stack([torch.from_numpy(data[i : i + BLOCK].astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy(data[i + 1 : i + 1 + BLOCK].astype(np.int64)) for i in ix])
@@ -190,7 +192,7 @@ for it in range(start_iter, args.max_iters):
 
     for micro in range(GRAD_ACCUM):
         x, y = get_batch("train")
-        with torch.autocast("cuda", dtype=torch.float16):
+        with torch.autocast("cuda", dtype=AMP_DTYPE):
             _, loss = model(x, y)
             loss = loss / GRAD_ACCUM
         scaler.scale(loss).backward()
@@ -220,15 +222,15 @@ for it in range(start_iter, args.max_iters):
             torch.save(
                 {"model": model.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(),
                  "iter": it, "best_val": best_val, "args": vars(args)},
-                "/content/ckpt_best.pt",
+                os.path.join(CKPT_DIR, "ckpt_best.pt"),
             )
 
     if (it + 1) % CKPT_EVERY == 0:
         torch.save(
             {"model": model.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(),
              "iter": it, "best_val": best_val, "args": vars(args)},
-            "/content/ckpt_last.pt",
+            os.path.join(CKPT_DIR, "ckpt_last.pt"),
         )
 
-torch.save({"model": model.state_dict(), "iter": latest, "best_val": best_val, "args": vars(args)}, "/content/ckpt_final.pt")
+torch.save({"model": model.state_dict(), "iter": latest, "best_val": best_val, "args": vars(args)}, os.path.join(CKPT_DIR, "ckpt_final.pt"))
 print(f"DONE iters {start_iter}..{latest}, best val {best_val:.4f}, total {(time.time()-t0)/60:.0f}min", flush=True)

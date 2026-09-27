@@ -1,13 +1,15 @@
-"""Phase 0 data prep (streaming, 12GB-RAM safe): FineWeb-Edu -> GPT-2 BPE uint16 bins.
+"""Phase 0 data prep (streaming, low-RAM safe): FineWeb-Edu -> GPT-2 BPE uint16 bins.
 
-v2: never loads a whole shard into RAM; iterates parquet in 5k-doc batches.
-Outputs /content/data/{train.bin,val.bin}. Reuses already-downloaded shards.
+v3: device-agnostic paths (script-relative); worker count auto-scales.
+Outputs <script_dir>/data/{train.bin,val.bin}. Reuses already-downloaded shards.
 """
 import os
 import numpy as np
 
-DATA_DIR = "/content/data"
-RAW_DIR = "/content/raw"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+RAW_DIR = os.path.join(SCRIPT_DIR, "raw")
+N_WORKERS = min(8, os.cpu_count() or 2)
 os.makedirs(DATA_DIR, exist_ok=True)
 
 SHARDS = ["sample/10BT/000_00000.parquet", "sample/10BT/001_00000.parquet"]
@@ -49,7 +51,7 @@ def stream_encode(path, mmap_path, val_out=None):
     m = np.memmap(mmap_path, dtype=np.uint16, mode="w+", shape=(TRAIN_CAP,))
     vm = [] if val_out else None
     pos = ndocs = 0
-    pool = Pool(2)
+    pool = Pool(N_WORKERS)
 
     def absorb(tok_lists):
         nonlocal pos, ndocs
