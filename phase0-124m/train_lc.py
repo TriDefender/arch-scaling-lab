@@ -59,6 +59,10 @@ p.add_argument("--out-dir", default=None)
 p.add_argument("--resume", default=None, help="full-state resume (model+opt+iter)")
 p.add_argument("--init-from", default=None, help="weights-only init; allows pos/len changes")
 p.add_argument("--extend-wpe", action="store_true", help="with --init-from: tile old wpe table to new seq_len")
+p.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw",
+               help="muon = hybrid Muon(2D hidden)+AdamW(rest), Moonlight-style")
+p.add_argument("--muon-lr", type=float, default=0.02)
+p.add_argument("--tb", choices=["on", "off"], default="on", help="TensorBoard events under <out>/tb/")
 args = p.parse_args()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -217,13 +221,38 @@ model = GPT().to(dev)
 nparams = sum(q.numel() for q in model.parameters())
 print(f"params: {nparams/1e6:.1f}M", flush=True)
 
-decay, no_decay = [], []
-for n, q in model.named_parameters():
-    (no_decay if (q.ndim < 2 or "ln" in n) else decay).append(q)
-opt = torch.optim.AdamW(
-    [{"params": decay, "weight_decay": args.weight_decay}, {"params": no_decay, "weight_decay": 0.0}],
-    lr=args.lr, betas=(0.9, 0.95), eps=1e-8, fused=True,
-)
+_WRITER = None
+
+def tb_add(tag, val, step):
+    global _WRITER
+    if args.tb != "on":
+        return
+    if _WRITER is None:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_dir = os.path.join(OUT, "tb", time.strftime("run-%Y%m%d-%H%M%S"))
+        _WRITER = SummaryWriter(log_dir=tb_dir)
+        print(f"tensorboard: events -> {tb_dir}", flush=True)
+    _WRITER.add_scalar(tag, val, step)
+
+def make_optimizers():
+    """[(optimizer, base_lr)]: adamw = single fused AdamW; muon = Muon on 2D hidden
+    matrices + fused AdamW on embeddings/head/1D params (Moonlight hybrid)."""
+    decay, no_decay = [], []
+    for n, q in model.named_parameters():
+        (no_decay if (q.ndim < 2 or "ln" in n) else decay).append(q)
+    opts = [(torch.optim.AdamW(
+        [{"params": decay, "weight_decay": args.weight_decay}, {"params": no_decay, "weight_decay": 0.0}],
+        lr=args.lr, betas=(0.9, 0.95), eps=1e-8, fused=True), args.lr)]
+    if args.optimizer == "adamw":
+        return opts
+    from muon import Muon
+    hidden2d = [q for n, q in model.named_parameters()
+                if q.ndim == 2 and not any(k in n for k in ("wte", "wpe", "lm_head"))]
+    n_muon = sum(q.numel() for q in hidden2d)
+    print(f"optimizer: Muon lr={args.muon_lr} on {len(hidden2d)} matrices ({n_muon/1e6:.1f}M) + AdamW lr={args.lr} on rest", flush=True)
+    return [(Muon(hidden2d, lr=args.muon_lr, weight_decay=args.weight_decay), args.muon_lr)] + opts
+
+optims = make_optimizers()
 AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 scaler = torch.amp.GradScaler("cuda", enabled=(AMP_DTYPE == torch.float16))
 print(f"amp dtype: {AMP_DTYPE}", flush=True)
@@ -273,7 +302,12 @@ start_iter, best_val = 0, float("inf")
 if args.resume and os.path.exists(args.resume):
     ck = torch.load(args.resume, map_location=dev, weights_only=False)
     model.load_state_dict(ck["model"])
-    opt.load_state_dict(ck["opt"])
+    opt_states = ck["opt"] if isinstance(ck["opt"], list) else [ck["opt"]]
+    if len(opt_states) != len(optims):
+        print(f"WARN: ckpt has {len(opt_states)} optimizer state(s), current config has {len(optims)}; starting optimizer state fresh", flush=True)
+    else:
+        for o, s in zip((o for o, _ in optims), opt_states):
+            o.load_state_dict(s)
     scaler.load_state_dict(ck["scaler"])
     start_iter, best_val = ck["iter"] + 1, ck["best_val"]
     print(f"resumed at iter {start_iter} (ckpt args: {ck.get('args')})", flush=True)
@@ -299,19 +333,24 @@ t0 = time.time()
 latest = start_iter
 tok_per_step = MICRO_BS * T * GRAD_ACCUM
 for it in range(start_iter, args.max_iters):
-    for g in opt.param_groups:
-        g["lr"] = lr_at(it)
+    lrf = lr_at(it) / args.lr
+    for o, base in optims:
+        for g in o.param_groups:
+            g["lr"] = base * lrf
     for _ in range(GRAD_ACCUM):
         x, y = get_batch("train")
         with torch.autocast("cuda", dtype=AMP_DTYPE):
             _, loss = model(x, y)
             loss = loss / GRAD_ACCUM
         scaler.scale(loss).backward()
-    scaler.unscale_(opt)
+    for o, _ in optims:
+        scaler.unscale_(o)
     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-    scaler.step(opt)
+    for o, _ in optims:
+        scaler.step(o)
     scaler.update()
-    opt.zero_grad(set_to_none=True)
+    for o, _ in optims:
+        o.zero_grad(set_to_none=True)
     latest = it
 
     if it % 50 == 0:
@@ -320,6 +359,9 @@ for it in range(start_iter, args.max_iters):
         tok_s = (it - start_iter + 1) * tok_per_step / el
         print(f"it {it} | loss {loss.item()*GRAD_ACCUM:.3f} | {tok_s:.0f} tok/s | "
               f"{torch.cuda.max_memory_allocated()/2**30:.1f}GB | {el/60:.0f}min", flush=True)
+        tb_add("train/loss", loss.item() * GRAD_ACCUM, it)
+        tb_add("perf/tok_s", tok_s, it)
+        tb_add("perf/vram_gb", torch.cuda.max_memory_allocated() / 2**30, it)
 
     if (it + 1) % args.eval_interval == 0:
         vl = eval_at(T, EVAL_ITERS)
@@ -328,11 +370,13 @@ for it in range(start_iter, args.max_iters):
         with open(LOG, "a") as f:
             f.write(f"{it},{loss.item()*GRAD_ACCUM:.4f},{vl:.4f},{tok_s:.0f},"
                     f"{torch.cuda.max_memory_allocated()/2**30:.2f},{el:.0f}\n")
+        tb_add("val/loss", vl, it)
+        tb_add("perf/tok_s", tok_s, it)
         print(f"== eval it {it}: val@{T} {vl:.4f} ({el/60:.0f}min) ==", flush=True)
         if vl < best_val:
             best_val = vl
             torch.save(
-                {"model": model.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(),
+                {"model": model.state_dict(), "opt": [o.state_dict() for o, _ in optims], "scaler": scaler.state_dict(),
                  "iter": it, "best_val": best_val, "args": vars(args)},
                 os.path.join(OUT, "ckpt_best.pt"),
             )
@@ -345,10 +389,12 @@ for it in range(start_iter, args.max_iters):
         with open(LENLOG, "a") as f:
             f.write(f"{it}," + ",".join(f"{row[l]:.4f}" for l in LEN_EVAL) + "\n")
         print(f"~~ len-eval it {it}: " + " ".join(f"@{l}={row[l]:.3f}" for l in LEN_EVAL), flush=True)
+        for l in LEN_EVAL:
+            tb_add(f"val_loss@len{l}", row[l], it)
 
     if (it + 1) % 1000 == 0:
         torch.save(
-            {"model": model.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(),
+            {"model": model.state_dict(), "opt": [o.state_dict() for o, _ in optims], "scaler": scaler.state_dict(),
              "iter": it, "best_val": best_val, "args": vars(args)},
             os.path.join(OUT, "ckpt_last.pt"),
         )
@@ -356,3 +402,5 @@ for it in range(start_iter, args.max_iters):
 torch.save({"model": model.state_dict(), "iter": latest, "best_val": best_val, "args": vars(args)},
            os.path.join(OUT, "ckpt_final.pt"))
 print(f"DONE iters {start_iter}..{latest}, best val {best_val:.4f}, total {(time.time()-t0)/60:.0f}min", flush=True)
+if _WRITER is not None:
+    _WRITER.close()
