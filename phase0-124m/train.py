@@ -36,6 +36,9 @@ DATA = os.path.join(SCRIPT_DIR, "data")
 parser = argparse.ArgumentParser()
 parser.add_argument("--max-iters", type=int, default=10000)
 parser.add_argument("--resume", type=str, default=None)
+parser.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw",
+                    help="muon = hybrid Muon(2D hidden)+AdamW(rest), Moonlight-style")
+parser.add_argument("--muon-lr", type=float, default=0.02)
 args = parser.parse_args()
 
 torch.manual_seed(1337)
@@ -123,13 +126,36 @@ model = GPT().to(dev)
 nparams = sum(p.numel() for p in model.parameters())
 print(f"params: {nparams/1e6:.1f}M", flush=True)
 
-decay, no_decay = [], []
-for n, p in model.named_parameters():
-    (no_decay if (p.ndim < 2 or "ln" in n) else decay).append(p)
-opt = torch.optim.AdamW(
-    [{"params": decay, "weight_decay": WEIGHT_DECAY}, {"params": no_decay, "weight_decay": 0.0}],
-    lr=LR, betas=(0.9, 0.95), eps=1e-8, fused=True,
-)
+def make_optimizers():
+    """Returns [(optimizer, base_lr)]. adamw: single fused AdamW.
+    muon: Muon on 2D hidden matrices + fused AdamW on embeddings/head/1D params."""
+    if args.optimizer == "adamw":
+        decay, no_decay = [], []
+        for n, p in model.named_parameters():
+            (no_decay if (p.ndim < 2 or "ln" in n) else decay).append(p)
+        opt = torch.optim.AdamW(
+            [{"params": decay, "weight_decay": WEIGHT_DECAY}, {"params": no_decay, "weight_decay": 0.0}],
+            lr=LR, betas=(0.9, 0.95), eps=1e-8, fused=True,
+        )
+        return [(opt, LR)]
+    from muon import Muon
+    hidden2d, decay, no_decay = [], [], []
+    for n, p in model.named_parameters():
+        if p.ndim == 2 and not any(k in n for k in ("wte", "wpe", "lm_head")):
+            hidden2d.append(p)
+        else:
+            (no_decay if (p.ndim < 2 or "ln" in n) else decay).append(p)
+    muon_opt = Muon(hidden2d, lr=args.muon_lr, weight_decay=WEIGHT_DECAY)
+    adamw_opt = torch.optim.AdamW(
+        [{"params": decay, "weight_decay": WEIGHT_DECAY}, {"params": no_decay, "weight_decay": 0.0}],
+        lr=LR, betas=(0.9, 0.95), eps=1e-8, fused=True,
+    )
+    n_muon = sum(p.numel() for p in hidden2d)
+    print(f"optimizer: Muon lr={args.muon_lr} on {len(hidden2d)} matrices ({n_muon/1e6:.1f}M) + AdamW lr={LR} on rest", flush=True)
+    return [(muon_opt, args.muon_lr), (adamw_opt, LR)]
+
+
+optims = make_optimizers()
 AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 scaler = torch.amp.GradScaler("cuda", enabled=(AMP_DTYPE == torch.float16))
 print(f"amp dtype: {AMP_DTYPE}", flush=True)
@@ -172,7 +198,12 @@ start_iter, best_val = 0, float("inf")
 if args.resume and os.path.exists(args.resume):
     ck = torch.load(args.resume, map_location=dev, weights_only=False)
     model.load_state_dict(ck["model"])
-    opt.load_state_dict(ck["opt"])
+    opt_states = ck["opt"] if isinstance(ck["opt"], list) else [ck["opt"]]
+    if len(opt_states) != len(optims):
+        print(f"WARN: ckpt has {len(opt_states)} optimizer state(s), current config has {len(optims)}; starting optimizer state fresh", flush=True)
+    else:
+        for o, s in zip((o for o, _ in optims), opt_states):
+            o.load_state_dict(s)
     scaler.load_state_dict(ck["scaler"])
     start_iter, best_val = ck["iter"] + 1, ck["best_val"]
     print(f"resumed at iter {start_iter}", flush=True)
@@ -187,8 +218,9 @@ t0 = time.time()
 latest = start_iter
 for it in range(start_iter, args.max_iters):
     lrf = lr_at(it) / LR
-    for g in opt.param_groups:
-        g["lr"] = LR * lrf
+    for o, base in optims:
+        for g in o.param_groups:
+            g["lr"] = base * lrf
 
     for micro in range(GRAD_ACCUM):
         x, y = get_batch("train")
@@ -196,11 +228,14 @@ for it in range(start_iter, args.max_iters):
             _, loss = model(x, y)
             loss = loss / GRAD_ACCUM
         scaler.scale(loss).backward()
-    scaler.unscale_(opt)
+    for o, _ in optims:
+        scaler.unscale_(o)
     torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-    scaler.step(opt)
+    for o, _ in optims:
+        scaler.step(o)
     scaler.update()
-    opt.zero_grad(set_to_none=True)
+    for o, _ in optims:
+        o.zero_grad(set_to_none=True)
     latest = it
 
     if it % 50 == 0:
@@ -220,14 +255,14 @@ for it in range(start_iter, args.max_iters):
         if vl < best_val:
             best_val = vl
             torch.save(
-                {"model": model.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(),
+                {"model": model.state_dict(), "opt": [o.state_dict() for o, _ in optims], "scaler": scaler.state_dict(),
                  "iter": it, "best_val": best_val, "args": vars(args)},
                 os.path.join(CKPT_DIR, "ckpt_best.pt"),
             )
 
     if (it + 1) % CKPT_EVERY == 0:
         torch.save(
-            {"model": model.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(),
+            {"model": model.state_dict(), "opt": [o.state_dict() for o, _ in optims], "scaler": scaler.state_dict(),
              "iter": it, "best_val": best_val, "args": vars(args)},
             os.path.join(CKPT_DIR, "ckpt_last.pt"),
         )
