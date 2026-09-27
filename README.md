@@ -25,6 +25,9 @@
 | 数据 | FineWeb-Edu sample-10BT 前 2 shards → train 1.50B tokens + val 2.2M tokens（GPT-2 BPE, uint16 bins） |
 | 训练 | bf16（4060 Ti Ada 原生）/ fp16+GradScaler（T4）、SDPA、fused AdamW、global batch 32768 tokens、warmup 200 + cosine LR 6e-4→0.1x、10000 iters ≈ 328M tokens |
 | 吞吐 | ~29k tok/s（4060 Ti, bf16, GPU 100%, 峰值 9.9GB）；~15.3k tok/s（T4 参照） |
+| **baseline 结果（2026-09-27 完成）** | 10000/10000 iters（328M tokens）；**best val loss 3.7472 @iter 8999**（终值 3.7528）；val 曲线：250→6.32, 1000→5.18, 3000→4.28, 5000→4.01, 7500→3.81, 9999→3.75 |
+| 总 GPU 时长 / 吞吐 | ≈3.4h（含 2 次中断续训）；全程平均 ~27.5k tok/s（续训段 ~27k，属 resume 前段 29k 正常衰减区间） |
+| 产物 | `phase0-124m/runs/124m-baseline/`：ckpt_best/ckpt_last/ckpt_final.pt、log.csv（iter≤1499）、log_resume_1500_10000.csv、stdout.log（旧 resume 前 ckpt 留 .pre_resume.bak） |
 
 ## Phase 0b：长上下文扩展（32k）
 
