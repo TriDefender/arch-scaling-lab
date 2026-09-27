@@ -1,0 +1,13 @@
+[Unit]
+Description=ASL v2 baseline: Muon + RoPE 4K (train_lc.py)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/openclaw/arch-scaling-lab
+ExecStart=/home/openclaw/arch-scaling-lab/scripts/run_v2.sh
+Restart=on-failure
+RestartSec=45
+
+[Install]
+WantedBy=default.target
