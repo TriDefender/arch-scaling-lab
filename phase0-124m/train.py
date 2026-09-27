@@ -38,6 +38,8 @@ parser.add_argument("--max-iters", type=int, default=10000)
 parser.add_argument("--resume", type=str, default=None)
 parser.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw",
                     help="muon = hybrid Muon(2D hidden)+AdamW(rest), Moonlight-style")
+parser.add_argument("--tb", choices=["on", "off"], default="on",
+                    help="write TensorBoard events under <out>/tb/ (default on)")
 parser.add_argument("--muon-lr", type=float, default=0.02)
 args = parser.parse_args()
 
@@ -125,6 +127,20 @@ class GPT(nn.Module):
 model = GPT().to(dev)
 nparams = sum(p.numel() for p in model.parameters())
 print(f"params: {nparams/1e6:.1f}M", flush=True)
+
+# ---- TensorBoard: scalars mirror log.csv; events under <out>/tb/run-<ts> ----
+_WRITER = None
+
+def tb_add(tag, val, step):
+    global _WRITER
+    if args.tb != "on":
+        return
+    if _WRITER is None:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_dir = os.path.join(CKPT_DIR, "tb", time.strftime("run-%Y%m%d-%H%M%S"))
+        _WRITER = SummaryWriter(log_dir=tb_dir)
+        print(f"tensorboard: events -> {tb_dir}", flush=True)
+    _WRITER.add_scalar(tag, val, step)
 
 def make_optimizers():
     """Returns [(optimizer, base_lr)]. adamw: single fused AdamW.
@@ -244,6 +260,9 @@ for it in range(start_iter, args.max_iters):
         tok_s = (it - start_iter + 1) * MICRO_BS * GRAD_ACCUM * BLOCK / el
         vram = torch.cuda.max_memory_allocated() / 2**30
         print(f"it {it} | loss {loss.item()*GRAD_ACCUM:.3f} | {tok_s:.0f} tok/s | {vram:.1f}GB | {el/60:.0f}min", flush=True)
+        tb_add("train/loss", loss.item() * GRAD_ACCUM, it)
+        tb_add("perf/tok_s", tok_s, it)
+        tb_add("perf/vram_gb", vram, it)
 
     if (it + 1) % EVAL_INTERVAL == 0:
         vl = eval_val()
@@ -251,6 +270,8 @@ for it in range(start_iter, args.max_iters):
         tok_s = (it - start_iter + 1) * MICRO_BS * GRAD_ACCUM * BLOCK / el
         with open(LOG, "a") as f:
             f.write(f"{it},{loss.item()*GRAD_ACCUM:.4f},{vl:.4f},{tok_s:.0f},{torch.cuda.max_memory_allocated()/2**30:.2f},{el:.0f}\n")
+        tb_add("val/loss", vl, it)
+        tb_add("perf/tok_s", tok_s, it)
         print(f"== eval it {it}: val {vl:.4f} ({el/60:.0f}min) ==", flush=True)
         if vl < best_val:
             best_val = vl
@@ -269,3 +290,5 @@ for it in range(start_iter, args.max_iters):
 
 torch.save({"model": model.state_dict(), "iter": latest, "best_val": best_val, "args": vars(args)}, os.path.join(CKPT_DIR, "ckpt_final.pt"))
 print(f"DONE iters {start_iter}..{latest}, best val {best_val:.4f}, total {(time.time()-t0)/60:.0f}min", flush=True)
+if _WRITER is not None:
+    _WRITER.close()
