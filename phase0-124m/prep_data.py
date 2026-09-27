@@ -12,7 +12,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 SHARDS = ["sample/10BT/000_00000.parquet", "sample/10BT/001_00000.parquet"]
 VAL_DOCS = 2000
-TRAIN_CAP = 700_000_000  # oversized mmap; truncated to real size at the end
+TRAIN_CAP = 900_000_000  # oversized mmap; truncated to real size at the end (shard ~750M tokens each)
 
 import pyarrow.parquet as pq
 
