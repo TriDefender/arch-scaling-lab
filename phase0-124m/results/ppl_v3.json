@@ -1,0 +1,16 @@
+{
+  "tag": "v3",
+  "ckpt": "/home/openclaw/arch-scaling-lab/runs/v3-adamw-rope4k/ckpt_final.pt",
+  "seq_len": 4096,
+  "len_strat": {
+    "256": 48.611,
+    "512": 43.016,
+    "1024": 41.158,
+    "2048": 39.361,
+    "4096": 37.088
+  },
+  "wikitext103_ppl": {
+    "1024": 95.156,
+    "4096": 77.81
+  }
+}

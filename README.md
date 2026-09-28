@@ -76,6 +76,22 @@ PPL 套件（`len_eval.py`：val.bin 长度分层 + WikiText-103-raw 零样本�
 2. **lc-4k**：YaRN factor 4 续训（init-from parity ckpt，LR 1e-4）
 3. **lc-32k**：YaRN factor 32 续训（LR 5e-5），分块 CE + 梯度检查点在此启用
 
+### v3 优化器归因格（2026-09-28 收割：AdamW+RoPE@4K，同预算 328M tok）
+
+v3 与 v2 只差优化器（AdamW vs Muon），直接归因 Muon 贡献。val loss 同长度口径（@4096）：v2 3.6790 → v3 3.6898，**Δopt = +0.0108（v3 更差）**，落在 0.01~0.02 边际档且方向偏 Muon——Muon 边际贡献成立，非白给。
+
+| 指标 | v2 Muon+RoPE | v3 AdamW+RoPE | Δ |
+|---|---|---|---|
+| val loss @4096 | **3.6790** | 3.6898 | −0.0108（偏 Muon） |
+| val PPL @4096 | **36.65** | 37.09 | +0.44 |
+| WT103 PPL @4096 | **76.3** | 77.8 | +1.5 |
+| LAMBADA acc | **0.1319** | 0.1037 | −2.8pp |
+| SciQ acc | **0.4330** | 0.3790 | −5.4pp |
+| PIQA acc | 0.5840 | 0.5780 | −0.6pp |
+| BLiMP acc | 0.7520 | **0.7645** | +1.3pp |
+
+读法：主信号（val loss / PPL）方向一致偏 Muon，easy-tier 主要任务（LAMBADA/SciQ）也明显偏 Muon；仅 BLiMP（句法性，与优化器关系最弱）和 WinoGrande 反向。**结论：优化器消融裁定 Muon 保留为矩阵优化器，边际档；RoPE 增益归因已剥离优化器轴。** 结果文件 `results/qa_v3.json` / `ppl_v3.json`。
+
 消融格：`wpe-32k-ext`（wpe 表尾块平铺扩到 32k，同预算）= 位置编码轴对照；可选 `lc-32k-scratch`（原生 32k 从零训）分离续训贡献。
 
 评估：`eval_lengths.csv` 记录 1k/2k/8k/32k 多窗口 val loss（loss-vs-context 曲线）；NIAH 谜题独立 harness（待建）。注意 MHA/GQA/MLA 的 KV 差异在 32k/16GB 下不设 KV 容量压力，预期不分高下，该轴需 128k+ 或等 KV 预算 + 驱逐。
