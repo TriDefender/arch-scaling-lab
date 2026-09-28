@@ -42,6 +42,30 @@
 
 读法：328M tokens（2 tok/param）下四集几乎全部贴着随机基线，区分度有限——ARC 上 v2 小幅胜出、WinoGrande 差距在 ~2σ 边缘、HellaSwag 持平。**结论：优化器+位置编码切换无 QA 退化，val loss（3.7472→3.6790）仍为主信号**；QA bench 保留为消融矩阵的标准 sanity gate，预计 token 预算上到 ≥1B 后才开始有区分度。注意 HellaSwag 语料与 FineWeb-Edu 同源（WikiHow 部分），小模型上偏乐观，横向对比仍有效。
 
+### Easy-tier + PPL 套件（2026-09-28 建，`dl_qa_easy.py` / `qa_eval.py` 扩展 / `len_eval.py` / `run_easy_suite.sh`）
+
+动机：旧四集里三个是对抗性构造（HellaSwag/ARC-C 专门过滤掉弱模型能答对的题），124M 级已顶到该模型类天花板（完全训练 GPT-2 124M 参考值：HellaSwag ~29-30 / ARC-E ~42-43 / WG ~51，我们已在 92%/99%/随机线）。换非对抗性的 GPT-2 时代任务 + BLiMP（BabyLM 小模型标准）+ PPL 族，天花板高得多（LAMBADA 36.5 / PIQA ~63 / SciQ ~60 / BLiMP 70+ / WT103 PPL 37.5）。
+
+新增任务口径：PIQA（val 1,000 子集，gimmaru 镜像）/ SciQ（val 1,000，closed-book，选项确定性混洗）/ BLiMP（67 现象×500=33,500 句对，空上下文+EOT 锚，sum-logprob 二元判定）/ LAMBADA-OpenAI（test 5,153，GPT-2 论文口径末词 argmax，单 token 末词过滤后 n=4,011）。
+
+| 任务（随机基线） | v1 AdamW+wpe | v2 Muon+RoPE | Δ acc |
+|---|---|---|---|
+| LAMBADA acc (~0) | 0.1015 | **0.1319** | +3.0pp |
+| SciQ acc (.25) | 0.4050 | **0.4330** | +2.8pp |
+| PIQA acc (.50) | 0.5830 | 0.5840 | +0.1pp (norm +1.7pp) |
+| BLiMP acc (.50) | 0.7436 | **0.7520** | +0.8pp |
+
+PPL 套件（`len_eval.py`：val.bin 长度分层 + WikiText-103-raw 零样本迁移，lm_head 分片防 logits 膨胀）：
+
+| 指标 | v1 (wpe@1K) | v2 (RoPE@4K) |
+|---|---|---|
+| val 分层 PPL @256 / 512 / 1024 | 49.80 / 44.30 / 42.62 | **48.28 / 42.32 / 40.52** |
+| val 分层 PPL @2048 / 4096 | —（wpe 结构性上限 1024） | **38.81 / 36.65** |
+| WT103 PPL @1024 | 99.2 | **93.4** |
+| WT103 PPL @4096 | — | **76.3** |
+
+读法：①同 T=1024 干净对比，v2 PPL 低 4.9%，与 val loss −0.068 一致；②上下文扩展是真实收益：v2 PPL 随上下文单调下降 48.3→36.7（−24%），@4096 比 v1 最佳（42.6@1024）低 14%——这是 RoPE@4K 增益的直接量化，也是后续位置编码消融的主探针；③easy-tier 区分度立竿见影（LAMBADA +3.0pp / SciQ +2.8pp，远超旧档噪声），且 8 任务全部方向一致偏 v2、零退化，新基线在行为层面成立；④我们距完全训练 GPT-2 的天花板仍远（LAMBADA 13.2 vs 36.5），与 4% token 预算相符。运维：全评测已快到 ~90 秒/ckpt（切片修复后），消融每格全适应跑无压力；长批任务用 `systemd-run --user`（exec 会话回收会连带杀 & 后台子进程，详见 workspace ERRORS.md 2026-09-28）。
+
 ## Phase 0b：长上下文扩展（32k）
 
 目的：1024 ctx 看不出各 attention 变体的长程检索（大海捞针）差异。协议见 `phase0-124m/lc_protocol.json`。

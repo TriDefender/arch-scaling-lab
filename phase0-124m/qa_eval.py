@@ -8,7 +8,7 @@ Usage:
   qa_eval.py --ckpt phase0-124m/runs/124m-baseline/ckpt_final.pt --tag v1 --pos wpe --seq-len 1024
 Model classes copied verbatim from train_lc.py (state_dict layout identical).
 """
-import argparse, json, re, time
+import argparse, json, math, random, re, time
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -167,6 +167,56 @@ def load_winogrande():
     return "winogrande", docs
 
 
+def load_piqa():
+    rows = pq.read_table(QA / "piqa_val.parquet").to_pylist()
+    docs = []
+    for d in rows:
+        docs.append({
+            "ctx": "Question: " + d["goal"] + "\nAnswer:",
+            "choices": [d["sol1"], d["sol2"]],
+            "gold": int(d["label"]),
+            "norm": True,
+        })
+    return "piqa", docs
+
+
+def load_sciq():
+    rows = pq.read_table(QA / "sciq_val.parquet").to_pylist()
+    docs = []
+    for i, d in enumerate(rows):
+        opts = [d["correct_answer"], d["distractor1"], d["distractor2"], d["distractor3"]]
+        order = list(range(4))
+        random.Random(i).shuffle(order)  # deterministic per-doc shuffle
+        docs.append({
+            "ctx": "Question: " + d["question"] + "\nAnswer:",
+            "choices": [opts[j] for j in order],
+            "gold": order.index(0),
+            "norm": True,
+        })
+    return "sciq", docs
+
+
+def load_blimp(per_cfg=500):
+    files = sorted(QA.glob("blimp_*.parquet"))
+    docs = []
+    for f in files:
+        rows = pq.read_table(f).to_pylist()[:per_cfg]
+        for d in rows:
+            docs.append({
+                "ctx": "",  # full-sentence acceptability: sum-logprob binary
+                "choices": [d["sentence_good"], d["sentence_bad"]],
+                "gold": 0,
+                "norm": False,
+            })
+    return "blimp", docs
+
+
+def load_lambada():
+    files = sorted(QA.glob("lambada_*.parquet"))
+    rows = pq.read_table(files[0]).to_pylist()
+    return "lambada", [{"text": d["text"].strip()} for d in rows if d.get("text", "").strip()]
+
+
 # ---------------- scoring ----------------
 enc = tiktoken.get_encoding("gpt2")
 
@@ -212,19 +262,21 @@ def score_batch(model, seqs, bs=16):
     return out
 
 
-def eval_task(model, docs, maxctx):
+def eval_task(model, docs, maxctx, bs=16):
     # build all (ctx, cont) pairs
     flat = []
     spans = []  # (doc_idx, choice_idx)
     for di, d in enumerate(docs):
         c = tok(d["ctx"])
+        if not c:
+            c = [50256]  # BOS/EOT anchor for empty-context tasks (blimp)
         if len(c) + 1 > maxctx:
             c = c[-(maxctx - 1):]
         for ci, ch in enumerate(d["choices"]):
             t = tok(" " + ch)
             flat.append((c, t, len(ch.encode("utf-8"))))
             spans.append((di, ci))
-    res = score_batch(model, flat)
+    res = score_batch(model, flat, bs=bs)
     per_doc = [[] for _ in docs]
     for (di, ci), r in zip(spans, res):
         per_doc[di].append(r)
@@ -236,7 +288,41 @@ def eval_task(model, docs, maxctx):
         if d["norm"]:
             accn += int(max(range(len(lpn)), key=lambda i: lpn[i]) == d["gold"])
     n = len(docs)
-    return acc / n, (accn / n if d["norm"] else None)
+    accn_val = accn / n if docs[0]["norm"] else None
+    return acc / n, accn_val
+
+
+@torch.no_grad()
+def eval_lambada(model, docs, maxctx, bs=32):
+    """GPT-2 paper protocol: predict the final word (argmax over vocab).
+    Keeps rows whose final word is exactly one BPE token."""
+    rows = []
+    for d in docs:
+        ids = tok(d["text"])
+        if len(ids) < 4 or len(ids) > maxctx:
+            continue
+        last_word = d["text"].split()[-1]
+        if enc.decode([ids[-1]]).strip() != last_word.strip():
+            continue
+        rows.append(ids)
+    order = sorted(range(len(rows)), key=lambda i: len(rows[i]))
+    hit = 0
+    for b in range(0, len(order), bs):
+        idxs = order[b:b + bs]
+        L = max(len(rows[i]) for i in idxs)
+        ids = torch.zeros(len(idxs), L, dtype=torch.long)
+        for r, i in enumerate(idxs):
+            ids[r, :len(rows[i])] = torch.tensor(rows[i])
+        ids = ids.to(dev)
+        lens = torch.tensor([len(rows[i]) for i in idxs], device=dev)
+        pos = lens - 2 + torch.arange(len(idxs), device=dev) * (L - 1)
+        tgts = ids[torch.arange(len(idxs), device=dev), lens - 1]
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            h, _ = model(ids[:, :-1])
+            logits = model.lm_head(h.reshape(-1, h.size(-1))[pos])
+        pred = logits.float().argmax(-1)
+        hit += int((pred == tgts).sum().item())
+    return hit / len(rows), len(rows)
 
 
 def main():
@@ -271,15 +357,33 @@ def main():
     print(f"loaded {a.ckpt} iter={ck.get('iter')} best_val={ck.get('best_val')}", flush=True)
 
     tasks = [load_hellaswag(), load_arc("arc_easy"), load_arc("arc_challenge"), load_winogrande()]
+    bs_map = {"hellaswag": 16, "arc_easy": 16, "arc_challenge": 16, "winogrande": 16}
+    optional = [("piqa", load_piqa, 16), ("sciq", load_sciq, 16), ("blimp", load_blimp, 64), ("lambada", load_lambada, 32)]
+    for nm, fn, tbs in optional:
+        bs_map[nm] = tbs
+        try:
+            tasks.append(fn())
+        except (FileNotFoundError, IndexError) as e:
+            print(f"skip {nm}: {e}", flush=True)
+            tasks.append((nm, []))
     results = {}
     for name, docs in tasks:
         torch.cuda.empty_cache()  # drop allocator high-water between tasks
         if a.limit:
             docs = docs[: a.limit]
+        if not docs:
+            results[name] = None
+            continue
         t0 = time.time()
-        acc, accn = eval_task(model, docs, a.seq_len)
+        if name == "lambada":
+            acc, n_used = eval_lambada(model, docs, a.seq_len)
+            accn = None
+            n = n_used
+        else:
+            acc, accn = eval_task(model, docs, a.seq_len, bs=bs_map.get(name, 16))
+            n = len(docs)
         dt = time.time() - t0
-        entry = {"n": len(docs), "acc": round(acc, 4), "acc_norm": round(accn, 4) if accn is not None else None}
+        entry = {"n": n, "acc": round(acc, 4), "acc_norm": round(accn, 4) if accn is not None else None}
         results[name] = entry
         print(f"{name:16s} n={entry['n']:5d} acc={entry['acc']:.4f} acc_norm={entry['acc_norm']} ({dt:.0f}s)", flush=True)
 

@@ -4,3 +4,10 @@ __pycache__/
 raw/
 data/
 *.bak
+
+# TensorBoard event records (keep local for now; do not commit)
+runs/**/tb/
+phase0-124m/tb/
+
+# ephemeral runtime logs (training curve of record stays in log.csv)
+*.log
