@@ -1,0 +1,28 @@
+{
+  "tag": "v1",
+  "ckpt": "runs/124m-baseline/ckpt_final.pt",
+  "iter": 9999,
+  "val_loss": 3.7471632957458496,
+  "results": {
+    "hellaswag": {
+      "n": 10042,
+      "acc": 0.268,
+      "acc_norm": 0.2683
+    },
+    "arc_easy": {
+      "n": 570,
+      "acc": 0.4211,
+      "acc_norm": 0.3316
+    },
+    "arc_challenge": {
+      "n": 299,
+      "acc": 0.1773,
+      "acc_norm": 0.2074
+    },
+    "winogrande": {
+      "n": 1267,
+      "acc": 0.5067,
+      "acc_norm": null
+    }
+  }
+}

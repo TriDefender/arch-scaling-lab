@@ -29,6 +29,19 @@
 | 总 GPU 时长 / 吞吐 | ≈3.4h（含 2 次中断续训）；全程平均 ~27.5k tok/s（续训段 ~27k，属 resume 前段 29k 正常衰减区间） |
 | 产物 | `phase0-124m/runs/124m-baseline/`：ckpt_best/ckpt_last/ckpt_final.pt、log.csv（iter≤1499）、log_resume_1500_10000.csv、stdout.log（旧 resume 前 ckpt 留 .pre_resume.bak） |
 
+### QA bench（似然式多选，lm-eval 口径，2026-09-27 建）
+
+`qa_eval.py`：loglikelihood 多选评分（acc + byte-length acc_norm），数据 `data/qa/`（HellaSwag val 10,042 / ARC-Easy 570 / ARC-Challenge 299 / WinoGrande-XL 1,267，HF parquet 直读，无训练集污染）。v1=`124m-baseline/ckpt_final`（wpe@1024），v2=`runs/v2-muon-rope4k/ckpt_final`（Muon+RoPE@4096）。
+
+| 任务（随机基线） | v1 AdamW+wpe | v2 Muon+RoPE | Δ acc |
+|---|---|---|---|
+| HellaSwag acc_norm (.25) | 0.2683 | **0.2706** | +0.2pp |
+| ARC-Easy acc (.25) | 0.4211 | **0.4281** | +0.7pp |
+| ARC-Challenge acc (.25) | 0.1773 | **0.1873** | +1.0pp |
+| WinoGrande acc (.50) | **0.5067** | 0.4807 | −2.6pp |
+
+读法：328M tokens（2 tok/param）下四集几乎全部贴着随机基线，区分度有限——ARC 上 v2 小幅胜出、WinoGrande 差距在 ~2σ 边缘、HellaSwag 持平。**结论：优化器+位置编码切换无 QA 退化，val loss（3.7472→3.6790）仍为主信号**；QA bench 保留为消融矩阵的标准 sanity gate，预计 token 预算上到 ≥1B 后才开始有区分度。注意 HellaSwag 语料与 FineWeb-Edu 同源（WikiHow 部分），小模型上偏乐观，横向对比仍有效。
+
 ## Phase 0b：长上下文扩展（32k）
 
 目的：1024 ctx 看不出各 attention 变体的长程检索（大海捞针）差异。协议见 `phase0-124m/lc_protocol.json`。

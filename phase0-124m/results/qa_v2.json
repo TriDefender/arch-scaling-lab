@@ -1,0 +1,28 @@
+{
+  "tag": "v2",
+  "ckpt": "../runs/v2-muon-rope4k/ckpt_final.pt",
+  "iter": 9999,
+  "val_loss": 3.679035723209381,
+  "results": {
+    "hellaswag": {
+      "n": 10042,
+      "acc": 0.2677,
+      "acc_norm": 0.2706
+    },
+    "arc_easy": {
+      "n": 570,
+      "acc": 0.4281,
+      "acc_norm": 0.3404
+    },
+    "arc_challenge": {
+      "n": 299,
+      "acc": 0.1873,
+      "acc_norm": 0.2107
+    },
+    "winogrande": {
+      "n": 1267,
+      "acc": 0.4807,
+      "acc_norm": null
+    }
+  }
+}
