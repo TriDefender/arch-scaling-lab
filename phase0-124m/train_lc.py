@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.checkpoint import checkpoint
 
 VOCAB = 50257
@@ -41,6 +42,10 @@ p.add_argument("--n-layer", type=int, default=12)
 p.add_argument("--n-head", type=int, default=12)
 p.add_argument("--n-embd", type=int, default=768)
 p.add_argument("--micro-bs", type=int, default=0, help="0 = auto by seq length")
+p.add_argument("--attn", type=str, default="auto",
+               choices=["auto", "FLASH_ATTENTION", "CUDNN_ATTENTION", "EFFICIENT_ATTENTION", "MATH"],
+               help="pin SDPA attention backend (auto = PyTorch picks; flash is optimal for bf16/4K, "
+                    "math/eager fallback would be ~16x slower at 4K - see attn_bench.py)")
 p.add_argument("--grad-accum", type=int, default=0, help="0 = auto to --global-tokens")
 p.add_argument("--global-tokens", type=int, default=32768)
 p.add_argument("--max-iters", type=int, default=10000)
@@ -132,10 +137,13 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, Tn, args.n_head, HEAD).transpose(1, 2)
         if cos is not None:
             q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
-        y = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True, scale=self.sdpa_scale,
-            dropout_p=self.attn_dropout if self.training else 0.0,
-        )
+        sdpa_kwargs = dict(is_causal=True, scale=self.sdpa_scale,
+                           dropout_p=self.attn_dropout if self.training else 0.0)
+        if args.attn == "auto":
+            y = F.scaled_dot_product_attention(q, k, v, **sdpa_kwargs)
+        else:
+            with sdpa_kernel(getattr(SDPBackend, args.attn)):
+                y = F.scaled_dot_product_attention(q, k, v, **sdpa_kwargs)
         y = y.transpose(1, 2).contiguous().view(B, Tn, C)
         return self.proj(y)
 

@@ -138,6 +138,27 @@ QA（v4 横扫 6/8）：hellaswag_norm .2727 / arc_e .4386 / arc_c .2040 / wg .5
 - `phase0-124m/train_lc.py` — 长上下文版训练器：RoPE/YaRN（NTK-by-parts + attention 温度）、wpe 可选 + `--extend-wpe` 尾块平铺扩表、分块+checkpoint 交叉熵、块级激活检查点（阈值可配）、多长度 val eval（eval_lengths.csv）、init-from 支持跨位置编码/长度热启动；seq_len 为视图参数，数据无需重打包
 - `phase0-124m/prep_data_lc.py` — 长上下文数据就绪校验（token id 范围、EOT 密度、各 seq_len 窗口统计）→ data_manifest.json
 - `phase0-124m/lc_protocol.json` — 32k 扩展协议：三阶段命令/预算/ETA + 消融格 + 评估协议
+- `attn_bench.py` — attention 后端横向对比（4K RoPE，数值/显存/吞吐 + micro-bs 扫描）
+
+## Attention 后端 bake-off（4K RoPE，2026-09-28）
+
+动机：4K 注意力稳定性是优先项，验证 SDPA auto 选择并防静默回退。`attn_bench.py`（bf16，fwd+bwd，B=2/H=12/hd=64/L=4096，镜像 train_lc 的 rope 与 YaRN 温度缩放），数值基准为 fp32 eager 参考：
+
+| 后端 | step ms | tok/s (attn op) | peak MiB | out err | dQ err |
+|---|---|---|---|---|---|
+| **auto (=flash)** | **9.09** | **901k** | 185 | .0093 | .0123 |
+| sdpa-flash | 9.22 | 888k | 185 | .0093 | .0123 |
+| sdpa-cudnn | 10.22 | 802k | 186 | .0093 | .0123 |
+| flex (compiled) | 10.30 | 796k | 185 | .0093 | .0123 |
+| sdpa-mem_eff | 12.82 | 639k | 185 | .0093 | .0177 |
+| sdpa-math | 148.34 | 55k | 6305 | .0093 | .0121 |
+| eager | 147.96 | 55k | 6261 | .0172 | .0175 |
+
+结论：
+- **auto 就是 flash**（数值逐位一致、计时一致）——现有 4K 训练已在最优 kernel 上
+- **math/eager 回退是灾难**：慢 16 倍、显存 34 倍（6.3GB vs 185MB）→ `train_lc.py` 新增 `--attn` 钉死后端，4K recipe 显式 `FLASH_ATTENTION` 保平安
+- micro-bs 扫描（flash）：B=1 1042k / B=2 889k / B=4 800k / B=8 792k tok/s——attention op 偏好小 batch；micro-bs 4 实测 12.2GB 不 OOM 但 e2e 无收益，**micro-bs 维持 2**
+- attention op 仅占 4K 训练步时 ~2%：kernel 选择买的是稳定保险，不是吞吐
 
 ## 已知坑（Colab free T4）
 
