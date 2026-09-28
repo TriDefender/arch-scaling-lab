@@ -125,6 +125,23 @@ QA（v4 横扫 6/8）：hellaswag_norm .2727 / arc_e .4386 / arc_c .2040 / wg .5
 
 结果文件 `results/qa_v4.json` / `ppl_v4.json` / `ppl_v4x.json`（外推）。
 
+### v6 注意力架构格 I：GQA-4KV（2026-09-28 收割：AdamW+RoPE@4K+GQA(4KV)，同预算 328M tok）
+
+对 v3 只差 KV 头数（12→4，共享组查询）；参数 152.8M（−9.5M，KV 投影固有差异，confound 记账）；KV cache 1024 B/token（v3 的 1/3）；训练 20.1k tok/s（比 v3 快 ~5-8%，KV FLOPs 更少），271 min。
+
+| 口径 | v3 MHA | v6 GQA-4KV | Δ |
+|---|---|---|---|
+| native val@4096 | （@1024 口径 3.6898） | 3.7061 | — |
+| len-strat PPL @1024 | 41.16 | 41.68 | **+0.0125 ln** |
+| len-strat PPL @4096 | 37.09 | 37.61 | **+0.0139 ln** |
+| WT103 @1024 / @4096 | 95.2 / 77.8 | 96.0 / 79.3 | +0.9 / +1.5 PPL |
+| QA 胜负 | — | **7/8 任务反超** | arc_c +1.3pp / sciq +2.7pp / piqa +1.3pp / hs +0.6pp |
+| QA 唯一退化 | wg .5075 | .4846 | −2.3pp（~1.6σ，边缘） |
+
+**读法（一个干净的分离现象）**：PPL 口径 GQA 全 band 均匀付出 ~+0.013 ln（@256 与 @4096 幅度一致 → 是容量效应不是长程效应，与 −5.9% 参数量自洽）；QA 口径却 7/8 反超。两口径结论分歧时以 QA 行为侧 + KV 经济性加权：**GQA ≈ 质量平价（PPL 微亏、QA 微赢、WinoGrande 单点存疑），3× KV cache + 训练提速实赚**。预注册判定带（±0.01 val）落在「平价」档，但方向对 GQA 有利。对 32k 线的含义：KV 压力场景 GQA 是免费午餐候选，v7 MLA（5.3× 压缩）若咬住质量则更优。
+
+结果文件 `results/qa_v6.json` / `ppl_v6.json`。v7 = MLA（latent 256 + rope 32，155.7M，576 B/token）已在跑，收割后出三架构终表。
+
 
 评估：`eval_lengths.csv` 记录 1k/2k/8k/32k 多窗口 val loss（loss-vs-context 曲线）；NIAH 谜题独立 harness（待建）。注意 MHA/GQA/MLA 的 KV 差异在 32k/16GB 下不设 KV 容量压力，预期不分高下，该轴需 128k+ 或等 KV 预算 + 驱逐。
 
