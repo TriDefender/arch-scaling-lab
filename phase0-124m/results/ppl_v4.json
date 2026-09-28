@@ -1,0 +1,16 @@
+{
+  "tag": "v4",
+  "ckpt": "runs/v4-adamw-rope1k/ckpt_final.pt",
+  "seq_len": 1024,
+  "len_strat": {
+    "256": 43.786,
+    "512": 39.044,
+    "1024": 37.639,
+    "2048": null,
+    "4096": null
+  },
+  "wikitext103_ppl": {
+    "1024": 86.069,
+    "4096": null
+  }
+}

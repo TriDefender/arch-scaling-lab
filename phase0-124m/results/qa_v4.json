@@ -1,0 +1,48 @@
+{
+  "tag": "v4",
+  "ckpt": "runs/v4-adamw-rope1k/ckpt_final.pt",
+  "iter": 9999,
+  "val_loss": 3.633431923389435,
+  "results": {
+    "hellaswag": {
+      "n": 10042,
+      "acc": 0.2671,
+      "acc_norm": 0.2727
+    },
+    "arc_easy": {
+      "n": 570,
+      "acc": 0.4386,
+      "acc_norm": 0.3789
+    },
+    "arc_challenge": {
+      "n": 299,
+      "acc": 0.204,
+      "acc_norm": 0.2107
+    },
+    "winogrande": {
+      "n": 1267,
+      "acc": 0.5107,
+      "acc_norm": null
+    },
+    "piqa": {
+      "n": 1000,
+      "acc": 0.591,
+      "acc_norm": 0.576
+    },
+    "sciq": {
+      "n": 1000,
+      "acc": 0.443,
+      "acc_norm": 0.423
+    },
+    "blimp": {
+      "n": 33500,
+      "acc": 0.7606,
+      "acc_norm": null
+    },
+    "lambada": {
+      "n": 4011,
+      "acc": 0.1234,
+      "acc_norm": null
+    }
+  }
+}
