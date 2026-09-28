@@ -46,6 +46,12 @@ p.add_argument("--attn", type=str, default="auto",
                choices=["auto", "FLASH_ATTENTION", "CUDNN_ATTENTION", "EFFICIENT_ATTENTION", "MATH"],
                help="pin SDPA attention backend (auto = PyTorch picks; flash is optimal for bf16/4K, "
                     "math/eager fallback would be ~16x slower at 4K - see attn_bench.py)")
+p.add_argument("--attn-arch", choices=["mha", "gqa", "mla"], default="mha",
+               help="attention architecture: mha (default), gqa (needs --n-kv-heads), mla (DeepSeek-V2 style)")
+p.add_argument("--n-kv-heads", type=int, default=0,
+               help="gqa: number of KV heads (0 = n_head; 12/4 = group 3, 12/1 = MQA)")
+p.add_argument("--mla-latent", type=int, default=256, help="mla: KV latent dim c_KV (cache = latent+rope dims)")
+p.add_argument("--mla-rope-dim", type=int, default=32, help="mla: decoupled shared RoPE head dim")
 p.add_argument("--grad-accum", type=int, default=0, help="0 = auto to --global-tokens")
 p.add_argument("--global-tokens", type=int, default=32768)
 p.add_argument("--max-iters", type=int, default=10000)
@@ -119,9 +125,13 @@ def apply_rope(x, cos, sin):  # x: (B, H, T, D)
 
 # ---------------- model ----------------
 class CausalSelfAttention(nn.Module):
+    """MHA (default) or GQA/MQA when --attn-arch gqa and n_kv < n_head."""
     def __init__(self):
         super().__init__()
-        self.qkv = nn.Linear(args.n_embd, 3 * args.n_embd)
+        self.n_h = args.n_head
+        self.n_kv = args.n_head if (args.attn_arch != "gqa" or args.n_kv_heads == 0) else args.n_kv_heads
+        assert self.n_h % self.n_kv == 0, f"n_head {self.n_h} not divisible by n_kv {self.n_kv}"
+        self.qkv = nn.Linear(args.n_embd, args.n_embd + 2 * self.n_kv * HEAD)
         self.proj = nn.Linear(args.n_embd, args.n_embd)
         self.attn_dropout = DROPOUT
         scale = 1.0 / math.sqrt(HEAD)
@@ -131,12 +141,66 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x, cos, sin):
         B, Tn, C = x.shape
-        q, k, v = self.qkv(x).split(C, dim=2)
-        q = q.view(B, Tn, args.n_head, HEAD).transpose(1, 2)
-        k = k.view(B, Tn, args.n_head, HEAD).transpose(1, 2)
-        v = v.view(B, Tn, args.n_head, HEAD).transpose(1, 2)
+        q, k, v = self.qkv(x).split([C, self.n_kv * HEAD, self.n_kv * HEAD], dim=2)
+        q = q.view(B, Tn, self.n_h, HEAD).transpose(1, 2)
+        k = k.view(B, Tn, self.n_kv, HEAD).transpose(1, 2)
+        v = v.view(B, Tn, self.n_kv, HEAD).transpose(1, 2)
         if cos is not None:
             q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
+        sdpa_kwargs = dict(is_causal=True, scale=self.sdpa_scale,
+                           dropout_p=self.attn_dropout if self.training else 0.0)
+        if self.n_kv != self.n_h:
+            sdpa_kwargs["enable_gqa"] = True
+        if args.attn == "auto":
+            y = F.scaled_dot_product_attention(q, k, v, **sdpa_kwargs)
+        else:
+            with sdpa_kernel(getattr(SDPBackend, args.attn)):
+                y = F.scaled_dot_product_attention(q, k, v, **sdpa_kwargs)
+        y = y.transpose(1, 2).contiguous().view(B, Tn, C)
+        return self.proj(y)
+
+
+class MLAttention(nn.Module):
+    """DeepSeek-V2 style MLA, simplified (no query-side latent compression):
+    KV compressed to a shared latent c_KV + decoupled RoPE on a small shared head.
+    Inference cache = (latent + rope_dim) x 2B/token, e.g. 576B vs MHA 3072B @ d=768."""
+    def __init__(self):
+        super().__init__()
+        self.n_h, self.d_h = args.n_head, HEAD
+        self.lat, self.rd = args.mla_latent, args.mla_rope_dim
+        self.wq = nn.Linear(args.n_embd, self.n_h * self.d_h + self.rd)
+        self.wdv = nn.Linear(args.n_embd, self.lat)          # down-proj; c_KV (+k_r) is the only cache
+        self.wuk = nn.Linear(self.lat, self.n_h * self.d_h, bias=False)
+        self.wuv = nn.Linear(self.lat, self.n_h * self.d_h, bias=False)
+        self.wkr = nn.Linear(args.n_embd, self.rd)           # shared RoPE key head
+        self.proj = nn.Linear(args.n_embd, args.n_embd)
+        self.attn_dropout = DROPOUT
+        scale = 1.0 / math.sqrt(self.d_h + self.rd)
+        if args.pos == "rope" and args.rope_factor > 1.0 and not args.no_yarn_temp:
+            scale /= 0.1 * math.log(args.rope_factor) + 1.0
+        self.sdpa_scale = scale
+
+    def forward(self, x, cos, sin):
+        B, Tn, C = x.shape
+        qc, qr = self.wq(x).split([self.n_h * self.d_h, self.rd], dim=2)
+        c = self.wdv(x)
+        kc = self.wuk(c).view(B, Tn, self.n_h, self.d_h)
+        vc = self.wuv(c).view(B, Tn, self.n_h, self.d_h)
+        kr = self.wkr(x).view(B, Tn, 1, self.rd)
+        q = qc.view(B, Tn, self.n_h, self.d_h)
+        if cos is not None:
+            qr = apply_rope(qr.view(B, Tn, 1, self.rd), cos, sin)
+            kr = apply_rope(kr, cos, sin)
+        else:
+            qr = qr.view(B, Tn, 1, self.rd)
+        # per-head [latent-part | shared-rope-part]; softmax scale on d_h + rd (DeepSeek convention)
+        q = torch.cat([q, qr.expand(B, Tn, self.n_h, self.rd)], dim=-1).transpose(1, 2)
+        k = torch.cat([kc, kr.expand(B, Tn, self.n_h, self.rd)], dim=-1).transpose(1, 2)
+        v = vc.transpose(1, 2)
+        # SDPA requires qk_dim == v_dim in all backends: zero-pad v, slice back after.
+        # Mathematically exact (softmax over the same 96-dim scores; padded output cols discarded).
+        if self.rd > 0:
+            v = F.pad(v, (0, self.rd))
         sdpa_kwargs = dict(is_causal=True, scale=self.sdpa_scale,
                            dropout_p=self.attn_dropout if self.training else 0.0)
         if args.attn == "auto":
@@ -144,7 +208,10 @@ class CausalSelfAttention(nn.Module):
         else:
             with sdpa_kernel(getattr(SDPBackend, args.attn)):
                 y = F.scaled_dot_product_attention(q, k, v, **sdpa_kwargs)
-        y = y.transpose(1, 2).contiguous().view(B, Tn, C)
+        y = y.transpose(1, 2)
+        if self.rd > 0:
+            y = y[..., :self.d_h]
+        y = y.contiguous().view(B, Tn, C)
         return self.proj(y)
 
 
@@ -162,7 +229,8 @@ class Block(nn.Module):
     def __init__(self):
         super().__init__()
         self.ln1, self.ln2 = nn.LayerNorm(args.n_embd), nn.LayerNorm(args.n_embd)
-        self.attn, self.mlp = CausalSelfAttention(), MLP()
+        attn_cls = MLAttention if args.attn_arch == "mla" else CausalSelfAttention
+        self.attn, self.mlp = attn_cls(), MLP()
 
     def forward(self, x, cos, sin):
         x = x + self.attn(self.ln1(x), cos, sin)
@@ -178,7 +246,8 @@ class GPT(nn.Module):
         if args.pos == "wpe":
             self.wpe = nn.Embedding(T, args.n_embd)
         else:
-            cos, sin = build_rope(HEAD, T, args.rope_base, args.rope_factor, args.rope_orig_len)
+            rope_hd = args.mla_rope_dim if args.attn_arch == "mla" else HEAD
+            cos, sin = build_rope(rope_hd, T, args.rope_base, args.rope_factor, args.rope_orig_len)
             self.register_buffer("rope_cos", cos, persistent=False)  # not in state_dict
             self.register_buffer("rope_sin", sin, persistent=False)
         self.blocks = nn.ModuleList([Block() for _ in range(args.n_layer)])

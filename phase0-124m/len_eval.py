@@ -67,11 +67,16 @@ def main():
     p.add_argument("--pos", choices=["rope", "wpe"], required=True)
     p.add_argument("--seq-len", type=int, required=True)
     p.add_argument("--out", default="results")
+    p.add_argument("--attn-arch", choices=["mha", "gqa", "mla"], default="mha")
+    p.add_argument("--n-kv-heads", type=int, default=0)
+    p.add_argument("--mla-latent", type=int, default=256)
+    p.add_argument("--mla-rope-dim", type=int, default=32)
     a = p.parse_args()
 
     args = argparse.Namespace(
         pos=a.pos, rope_base=10000.0, rope_factor=1.0, rope_orig_len=1024, no_yarn_temp=False,
         n_layer=12, n_head=12, n_embd=768,
+        attn_arch=a.attn_arch, n_kv_heads=a.n_kv_heads, mla_latent=a.mla_latent, mla_rope_dim=a.mla_rope_dim,
     )
     qa_eval.args = args
     qa_eval.HEAD = 768 // 12  # head_dim = n_embd // n_head; n_head=12 was the bug (crashed attention view)
