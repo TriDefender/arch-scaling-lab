@@ -115,6 +115,8 @@ class GPT(nn.Module):
         for blk in self.blocks:
             x = blk(x, cos, sin)
         x = self.ln_f(x)
+        if targets is None:
+            return x, None  # hidden states; score_batch projects only needed positions
         logits = self.lm_head(x)
         return logits, None
 
@@ -188,16 +190,25 @@ def score_batch(model, seqs, bs=16):
         for r, t in enumerate(toks):
             ids[r, :len(t)] = torch.tensor(t)
         ids = ids.to(dev)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            logits, _ = model(ids[:, :-1])
-        logprobs = F.log_softmax(logits.float(), -1)
+        # gather continuation positions BEFORE lm_head: logits shrink from B*(L-1)*V to P*V
+        pos_flat, tgts, spans = [], [], []
         for r, i in enumerate(idxs):
             _, cont, nb = seqs[i]
             n = len(cont)
             end = len(toks[r])
-            tgt = ids[r, end - n:end]
-            lp = logprobs[r, end - n - 1:end - 1].gather(1, tgt[:, None]).sum().item()
-            out[i] = (lp, n, nb)
+            pos_flat.append(torch.arange(end - n - 1, end - 1) + r * (L - 1))
+            tgts.append(ids[r, end - n:end])
+            spans.append((i, n, nb))
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            h, _ = model(ids[:, :-1])
+            hsel = h.reshape(-1, h.size(-1))[torch.cat(pos_flat)]
+            logits = model.lm_head(hsel)
+        logprobs = F.log_softmax(logits.float(), -1)
+        lp_all = logprobs.gather(1, torch.cat(tgts).to(dev)[:, None]).sum(-1)
+        off = 0
+        for r, (i, n, nb) in enumerate(spans):
+            out[i] = (lp_all[off:off + n].sum().item(), n, nb)
+            off += n
     return out
 
 
@@ -262,6 +273,7 @@ def main():
     tasks = [load_hellaswag(), load_arc("arc_easy"), load_arc("arc_challenge"), load_winogrande()]
     results = {}
     for name, docs in tasks:
+        torch.cuda.empty_cache()  # drop allocator high-water between tasks
         if a.limit:
             docs = docs[: a.limit]
         t0 = time.time()
