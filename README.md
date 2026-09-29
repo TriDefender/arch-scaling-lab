@@ -157,6 +157,25 @@ QA（v4 横扫 6/8）：hellaswag_norm .2727 / arc_e .4386 / arc_c .2040 / wg .5
 
 结果文件 `results/qa_v7.json` / `ppl_v7.json`。
 
+### v5 YaRN 1K→4K 扩展格（2026-09-29 收割：v4 权重 init + YaRN factor 4 续训 82M tok，两门判定双败）
+
+配方：weights-only init 自 v4（AdamW+RoPE@1K，val 3.6334），YaRN factor=4 续训 2500 it / 82M tok（lr 2e-4），19.3k tok/s，71 min。预注册两道门（README v4 节）：门 A @1024 回退 ≤0.02 ln（≤3.6534）；门 B len-strat PPL@4096 ≤37。
+
+| 口径 | v4 native@1K | v5 YaRN→4K | 门 |
+|---|---|---|---|
+| len-strat PPL @256 / 512 | 43.79 / 39.04 | 44.32 / 40.17 | — |
+| len-strat ln @1024 | 3.6334（native val） | **3.6638**（PPL 39.03） | **门 A 未过**（回退 +0.030，超 0.011） |
+| len-strat PPL @2048 | —（外推 53.82 崩） | 50.37 | — |
+| len-strat PPL @4096 | —（外推 110.8 崩） | **92.60** | **门 B 未过**（vs v3 native 37.1） |
+| WT103 @1024 / @4096 | 86.1 / — | 90.9 / 217.6 | — |
+| 训练 val@4096 轨迹 | — | 3.6653→3.5682（单调下降，未收敛） | — |
+
+QA（v3 档口径）：hellaswag .2680 / arc_e .4404 / arc_c .2040 / wg .5162 / piqa .5940 / sciq .4540 / blimp .7696 / lambada .1324——多数任务与 v4 持平或小胜，短上下文行为侧未崩，但主信号（PPL）两处门均未过。
+
+**读法（如实报败）**：82M token 的 YaRN 插值续训不足以兑现 4K 能力——@4096 虽比 v4 直接外推（110.8）好一个档，但离 v3 native 37.1 差 2.5×；@1024 也付出 +0.030 ln（门 A 0.020 之外）。训练 val@4096 全程单调下降（3.665→3.568，斜率未归零）指向**欠训练而非路线错误**：YaRN「练短送长」在 124M 操作点需要的续训预算远大于 0.25×原预算。对 32k 线的含义：插值扩展不能按 82M tok 这个量级记账——32k 线若走 YaRN，续训预算需与原生训练同数量级（或改从 4K native 续），否则等于重蹈 v5。**v5 判定：失败格，不进入 32k 预演链**。
+
+结果文件 `results/qa_v5.json` / `ppl_v5.json`。
+
 
 评估：`eval_lengths.csv` 记录 1k/2k/8k/32k 多窗口 val loss（loss-vs-context 曲线）；NIAH 谜题独立 harness（待建）。注意 MHA/GQA/MLA 的 KV 差异在 32k/16GB 下不设 KV 容量压力，预期不分高下，该轴需 128k+ 或等 KV 预算 + 驱逐。
 

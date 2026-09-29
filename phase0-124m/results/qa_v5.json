@@ -1,0 +1,48 @@
+{
+  "tag": "v5",
+  "ckpt": "../runs/v5-yarn-1k-to-4k/ckpt_final.pt",
+  "iter": 2499,
+  "val_loss": 3.5682272732257845,
+  "results": {
+    "hellaswag": {
+      "n": 10042,
+      "acc": 0.268,
+      "acc_norm": 0.2734
+    },
+    "arc_easy": {
+      "n": 570,
+      "acc": 0.4404,
+      "acc_norm": 0.3614
+    },
+    "arc_challenge": {
+      "n": 299,
+      "acc": 0.204,
+      "acc_norm": 0.2107
+    },
+    "winogrande": {
+      "n": 1267,
+      "acc": 0.5162,
+      "acc_norm": null
+    },
+    "piqa": {
+      "n": 1000,
+      "acc": 0.594,
+      "acc_norm": 0.59
+    },
+    "sciq": {
+      "n": 1000,
+      "acc": 0.454,
+      "acc_norm": 0.436
+    },
+    "blimp": {
+      "n": 33500,
+      "acc": 0.7696,
+      "acc_norm": null
+    },
+    "lambada": {
+      "n": 4011,
+      "acc": 0.1324,
+      "acc_norm": null
+    }
+  }
+}
