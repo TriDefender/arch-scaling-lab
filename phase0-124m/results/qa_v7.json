@@ -1,0 +1,48 @@
+{
+  "tag": "v7",
+  "ckpt": "../runs/v7-mla-rope4k/ckpt_final.pt",
+  "iter": 9999,
+  "val_loss": 3.9317147076129912,
+  "results": {
+    "hellaswag": {
+      "n": 10042,
+      "acc": 0.267,
+      "acc_norm": 0.2694
+    },
+    "arc_easy": {
+      "n": 570,
+      "acc": 0.3965,
+      "acc_norm": 0.3421
+    },
+    "arc_challenge": {
+      "n": 299,
+      "acc": 0.2107,
+      "acc_norm": 0.2475
+    },
+    "winogrande": {
+      "n": 1267,
+      "acc": 0.4972,
+      "acc_norm": null
+    },
+    "piqa": {
+      "n": 1000,
+      "acc": 0.595,
+      "acc_norm": 0.568
+    },
+    "sciq": {
+      "n": 1000,
+      "acc": 0.357,
+      "acc_norm": 0.375
+    },
+    "blimp": {
+      "n": 33500,
+      "acc": 0.7149,
+      "acc_norm": null
+    },
+    "lambada": {
+      "n": 4011,
+      "acc": 0.082,
+      "acc_norm": null
+    }
+  }
+}
